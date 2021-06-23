@@ -1,17 +1,19 @@
 package main
 
 import (
+	// "crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
-	"math"
-	"net/http"
-	"strconv"
-
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
+	"log"
+	"math"
+	"net/http"
+	// "net/smtp"
+	"strconv"
+	"strings"
 )
 
 //database login info
@@ -78,6 +80,12 @@ type ThMsgJson struct {
 	Alarm_level      int     `json:"alarm_level"`
 }
 
+// //send mail
+// type mail struct {
+// 	user   string
+// 	passwd string
+// }
+
 //newest record
 type probeRecord struct {
 	customer_user_no int
@@ -88,6 +96,7 @@ type probeRecord struct {
 	index_date       string
 	last_update_time string
 }
+
 type sensorRecord struct {
 	customer_user_no int
 	gateway          int
@@ -109,16 +118,68 @@ var (
 	//newest record
 	probeNewRecord  map[int]probeRecord
 	sensorNewRecord map[int]sensorRecord
-	// buttonState
+	//buttonState
 	bState buttonState
+	//error test
+	probeErr  int = 0
+	sensorErr int = 0
 )
 
 func checkErr(err error) {
 	if err != nil {
 		println(err.Error())
-		// panic(err)
 	}
 }
+
+// //send mail
+// func New(u string, p string) mail {
+// 	temp := mail{user: u, passwd: p}
+// 	return temp
+// }
+
+// func (m mail) Send(title string, text string, toId string) {
+// 	auth := smtp.PlainAuth("", m.user, m.passwd, "smtp.gmail.com")
+// 	tlsconfig := &tls.Config{
+// 		InsecureSkipVerify: true,
+// 		ServerName:         "smtp.gmail.com",
+// 	}
+// 	conn, err := tls.Dial("tcp", "smtp.gmail.com:465", tlsconfig)
+// 	checkErr(err)
+
+// 	client, err := smtp.NewClient(conn, "smtp.gmail.com")
+// 	checkErr(err)
+// 	if err = client.Auth(auth); err != nil {
+// 		log.Panic(err)
+// 	}
+// 	if err = client.Mail(m.user); err != nil {
+// 		log.Panic(err)
+// 	}
+// 	if err = client.Rcpt(toId); err != nil {
+// 		log.Panic(err)
+// 	}
+// 	w, err := client.Data()
+// 	checkErr(err)
+// 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", m.user, toId, title, text)
+// 	_, err = w.Write([]byte(msg))
+// 	checkErr(err)
+// 	err = w.Close()
+// 	checkErr(err)
+// 	client.Quit()
+// }
+
+// send line message
+func notifyHandler(msg string) {
+	authorization_code := `LI8tw1WCkVD63d5MeGnFJSA0cht3rXO7BiaBtX7MmKI`
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", "https://notify-api.line.me/api/notify", strings.NewReader("message="+msg))
+	checkErr(err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+authorization_code)
+	resp, err := client.Do(req)
+	checkErr(err)
+	defer resp.Body.Close()
+}
+
 func sendProbRecord(probe int) interface{} {
 	probeRec := probeNewRecord[probe]
 	//conect db
@@ -256,9 +317,15 @@ func sendSensorRecord(sensor int) interface{} {
 	db, err := sql.Open("mysql", connectionString)
 	checkErr(err)
 	// take 1440
-	rows, err := db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date <=? and sensor_no=? ORDER BY index_date desc limit 1440", sensorRec.index_date, sensorRec.sensor)
-	checkErr(err)
 
+	var rows *sql.Rows
+	if sensorRec.gateway == 101 {
+		rows, err = db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date>? and index_date<=? and sensor_no=? ORDER BY index_date desc limit 1440", "20210401000000", sensorRec.index_date, sensorRec.sensor)
+		checkErr(err)
+	} else {
+		rows, err = db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date<=? and sensor_no=? ORDER BY index_date desc limit 1440", sensorRec.index_date, sensorRec.sensor)
+		checkErr(err)
+	}
 	var outputData [1440]interface{}
 	count := 0
 	fmt.Println("--start package--")
@@ -319,6 +386,13 @@ func sendSensorRecord(sensor int) interface{} {
 	}
 	fmt.Println("--packaged: y--")
 	return outPut
+}
+
+func errTest(ctx *gin.Context) {
+	probeErr = 1
+	sensorErr = 1
+	fmt.Println("probeErr:", probeErr)
+	fmt.Println("sensorErr:", sensorErr)
 }
 
 func getProbes(ctx *gin.Context) {
@@ -440,6 +514,23 @@ func electAPI(ctx *gin.Context) {
 			gin.H{"error": err.Error()})
 		return
 	}
+	//error test
+	if probeErr == 1 {
+		electmsg.Data_sum = electmsg.Ai_power_upperbound2 + 2.1
+		electmsg.Alarm_level_power = 2
+		probeErr = 0
+		fmt.Println("Data_sum:", electmsg.Data_sum)
+		fmt.Println("Ai_power_upperbound2:", electmsg.Ai_power_upperbound2)
+	}
+	//send message
+	if electmsg.Data_sum > electmsg.Ai_power_upperbound2 {
+		fmt.Println("send msg")
+		tx := fmt.Sprintln("Probe_no:", electmsg.Powerprobe_no, "功耗:", electmsg.Data_sum, "。高出正常值，請立即前往查看 http://web.wasay.cc/")
+		notifyHandler(tx)
+		// foo := New("bearlinm8866@gmail.com", "googlegoogle")
+		// foo.Send("[系統通知]AI監測電力數據異常", tx, "bear_linm8866@yahoo.com.tw")
+		fmt.Println("send complete")
+	}
 	//nwest record
 	record := probeRecord{
 		customer_user_no: electmsg.Customer_user_no,
@@ -457,9 +548,9 @@ func electAPI(ctx *gin.Context) {
 	db, err := sql.Open("mysql", connectionString)
 	checkErr(err)
 	// update data
-	sqlStatement, err := db.Prepare("update rawDataProbeCSV set ai_power_upperbound1=?,ai_power_upperbound2=?,ai_power_lowerbound1=?,ai_power_lowerbound2=?,alarm_level_power=?,alarm_level_voltage=?,alarm_level_ampere=? where index_date=? and last_update_time=? and customer_user_no=? and gateway_no=? and powerprobe_no=? and data=? and data_sum=? and VOL=? and AMP=? and KW=? and PF=?")
+	sqlStatement, err := db.Prepare("update rawDataProbeCSV set data_sum=?,ai_power_upperbound1=?,ai_power_upperbound2=?,ai_power_lowerbound1=?,ai_power_lowerbound2=?,alarm_level_power=?,alarm_level_voltage=?,alarm_level_ampere=? where index_date=? and last_update_time=? and customer_user_no=? and gateway_no=? and powerprobe_no=?")
 	checkErr(err)
-	res, err := sqlStatement.Exec(electmsg.Ai_power_upperbound1, electmsg.Ai_power_upperbound2, electmsg.Ai_power_lowerbound1, electmsg.Ai_power_lowerbound2, electmsg.Alarm_level_power, electmsg.Alarm_level_voltage, electmsg.Alarm_level_ampere, electmsg.Index_date, electmsg.Last_update_time, electmsg.Customer_user_no, electmsg.Gateway_no, electmsg.Powerprobe_no, electmsg.Data, electmsg.Data_sum, electmsg.VOL, electmsg.AMP, electmsg.KW, electmsg.PF)
+	res, err := sqlStatement.Exec(electmsg.Data_sum, electmsg.Ai_power_upperbound1, electmsg.Ai_power_upperbound2, electmsg.Ai_power_lowerbound1, electmsg.Ai_power_lowerbound2, electmsg.Alarm_level_power, electmsg.Alarm_level_voltage, electmsg.Alarm_level_ampere, electmsg.Index_date, electmsg.Last_update_time, electmsg.Customer_user_no, electmsg.Gateway_no, electmsg.Powerprobe_no)
 	checkErr(err)
 	rowCount, err := res.RowsAffected()
 	checkErr(err)
@@ -657,6 +748,23 @@ func thAPI(ctx *gin.Context) {
 			gin.H{"error": err.Error()})
 		return
 	}
+	//error test
+	if sensorErr == 1 {
+		thmsg.Value = thmsg.Ai_upperbound + math.Abs(thmsg.Ai_upperbound*float64(0.1)) + 2.1
+		thmsg.Alarm_level = 2
+		sensorErr = 0
+		fmt.Println("Value:", thmsg.Value)
+		fmt.Println("Ai_upperbound2:", thmsg.Ai_upperbound+math.Abs(thmsg.Ai_upperbound*float64(0.1)))
+	}
+	//send message
+	if thmsg.Value > thmsg.Ai_upperbound+math.Abs(thmsg.Ai_upperbound*float64(0.1)) {
+		fmt.Println("send msg")
+		tx := fmt.Sprintln("Gateway_no:", thmsg.Gateway_no, "Sensor_no:", thmsg.Sensor_no, "溫濕度:", thmsg.Value, " 。數據高出正常值，請立即前往查看 http://web.wasay.cc/")
+		notifyHandler(tx)
+		// foo := New("bearlinm8866@gmail.com", "googlegoogle")
+		// foo.Send("[系統通知]AI監測溫濕度數據異常", tx, "bear_linm8866@yahoo.com.tw")
+		fmt.Println("send complete")
+	}
 	//nwest record
 	record := sensorRecord{
 		customer_user_no: thmsg.Customer_user_no,
@@ -672,9 +780,9 @@ func thAPI(ctx *gin.Context) {
 	db, err := sql.Open("mysql", connectionString)
 	checkErr(err)
 	// update data
-	sqlStatement, err := db.Prepare("update rawDataSensorCSV set ai_upperbound=?,ai_lowerbound=?,alarm_level=? where index_date=? and last_update_time=? and customer_user_no=? and gateway_no=? and sensor_no=? and sensor_type=? and value=?")
+	sqlStatement, err := db.Prepare("update rawDataSensorCSV set value=?,ai_upperbound=?,ai_lowerbound=?,alarm_level=? where index_date=? and last_update_time=? and customer_user_no=? and gateway_no=? and sensor_no=? and sensor_type=?")
 	checkErr(err)
-	res, err := sqlStatement.Exec(thmsg.Ai_upperbound, thmsg.Ai_lowerbound, thmsg.Alarm_level, thmsg.Index_date, thmsg.Last_update_time, thmsg.Customer_user_no, thmsg.Gateway_no, thmsg.Sensor_no, thmsg.Sensor_type, thmsg.Value)
+	res, err := sqlStatement.Exec(thmsg.Value, thmsg.Ai_upperbound, thmsg.Ai_lowerbound, thmsg.Alarm_level, thmsg.Index_date, thmsg.Last_update_time, thmsg.Customer_user_no, thmsg.Gateway_no, thmsg.Sensor_no, thmsg.Sensor_type)
 	checkErr(err)
 	rowCount, err := res.RowsAffected()
 	checkErr(err)
@@ -682,8 +790,14 @@ func thAPI(ctx *gin.Context) {
 
 	if thMessageChan != nil && bState.bSensor == thmsg.Sensor_no {
 		// take 1440
-		rows, err := db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date <=? and sensor_no=?ORDER BY index_date desc limit 1440", thmsg.Index_date, thmsg.Sensor_no)
-		checkErr(err)
+		var rows *sql.Rows
+		if thmsg.Gateway_no == 101 {
+			rows, err = db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date>? and index_date<=? and sensor_no=? ORDER BY index_date desc limit 1440", "20210401000000", thmsg.Index_date, thmsg.Sensor_no)
+			checkErr(err)
+		} else {
+			rows, err = db.Query("SELECT * FROM rawDataSensorCSV WHERE index_date<=? and sensor_no=? ORDER BY index_date desc limit 1440", thmsg.Index_date, thmsg.Sensor_no)
+			checkErr(err)
+		}
 
 		var outputData [1440]interface{}
 		count := 0
@@ -783,18 +897,24 @@ func main() {
 	// r.LoadHTMLGlob("template/*") //load 渲染模板
 	// r.GET("/testElec", testElec)
 	// r.GET("/testTeHu", testTeHu)
+
+	//error test
+	r.GET("/errTest", errTest)
+
+	//See Newest Record data (for devolopement)
 	r.GET("/getProbeNewRecord", getProbeNewRecord)
 	r.GET("/getSensorNewRecord", getSensorNewRecord)
+
 	//get Probe Gateway Sensor numbers
 	r.GET("/getProbes", getProbes)
 	r.GET("/getGateways", getGateways)
 	r.GET("/getSensors", getSensors)
+
 	//SSE
 	r.GET("/electSSE", electSSE)               //即時傳送到前端
 	r.POST("/api/aiPostProbeRecord", electAPI) //接API傳送的資料
 	r.GET("/thSSE", thSSE)                     //即時傳送到前端
 	r.POST("/api/aiPostSensorRecord", thAPI)   //接API傳送的資料
-
 	r.Run(":7321")
 
 }
